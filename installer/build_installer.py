@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_FILES = ["app.py", "engine.py", "concepts.py", "export.py", "blender_post.py", "blender_rig.py",
+APP_FILES = ["app.py", "engine.py", "concepts.py", "export.py", "blender_post.py", "blender_rig.py", "blender_style.py", "upscale.py",
              "castforge_engine.py", "requirements.txt"]
 
 

@@ -21,6 +21,28 @@ The log is saved to `F:\CastForge\castforge-setup.log`.
 3. Click the concept you like, then click **Cast it**.
 4. Find your files in `F:\CastForge\app\outputs\<date>_<name>\`.
 
+## Looks and quality
+
+| Setting | Options | What it does |
+|---|---|---|
+| **Style** | Freeform, Realistic, Hand-painted, Toon, Chibi, Dark fantasy, Sci-fi, Clay, Steampunk, Low poly, Voxel | Adds the right words to your prompt for the concept images. **Low poly** and **Voxel** also rebuild the model itself in that style (sliders under Settings) |
+| **Concept images** | Fast (512 px) / Quality (1024 px) | Quality uses RealVisXL Lightning: sharper, more detailed concepts, about 7 GB download the first time |
+| **Shape model** | Fast (mini) / Quality (full) | Quality uses the full Hunyuan3D-2 turbo shape model: more detail, slower. Download it once with the commands below |
+| **Texture sharpening** | Off / Sharpen (2K) / 4K | Real-ESRGAN AI upscale of the texture. 2K keeps the size but sharper, 4K doubles it |
+
+### Quality shape model (one-time download, about 5.3 GB)
+
+Run this in PowerShell, then restart CastForge:
+
+```powershell
+$b='F:\CastForge\engine\Hunyuan3D2_WinPortable\HuggingFaceHub\tencent\Hunyuan3D-2'; $u='https://huggingface.co/tencent/Hunyuan3D-2/resolve/main'
+foreach ($f in @(@('hunyuan3d-dit-v2-0-turbo',4930777530),@('hunyuan3d-vae-v2-0-turbo',407410402))) {
+  $d="$b\$($f[0])"; New-Item -ItemType Directory -Force $d | Out-Null
+  curl.exe -L --fail -o "$d\config.yaml" "$u/$($f[0])/config.yaml"
+  do { curl.exe -L -C - --retry 20 --retry-all-errors -o "$d\model.fp16.safetensors" "$u/$($f[0])/model.fp16.safetensors" } until ((Get-Item "$d\model.fp16.safetensors").Length -eq $f[1])
+}
+```
+
 ## Export presets
 
 | Preset  | You get | Notes |
@@ -58,7 +80,7 @@ place the markers, and download Idle, Walking and Running as FBX (With Skin for 
 - The **Recipes** tab reloads the exact seed and image of any earlier cast.
 - **Finish a GLB** turns any `.glb` file into LODs and engine/print exports.
 
-Hunyuan3D 2 (Tencent Hunyuan Community License) and SDXL-Turbo (Stability AI non-commercial licence) are fine for personal use.
+Hunyuan3D 2 (Tencent Hunyuan Community License), SDXL-Turbo (Stability AI non-commercial licence), RealVisXL V5 (OpenRAIL++) and Real-ESRGAN (BSD-3) are fine for personal use.
 
 ## Uninstall
 

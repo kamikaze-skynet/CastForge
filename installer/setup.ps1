@@ -381,6 +381,7 @@ try { `$Host.UI.RawUI.WindowTitle = 'CastForge'; `$Host.UI.RawUI.BackgroundColor
 `$env:TEMP = '$Root\tmp'; `$env:TMP = '$Root\tmp'
 `$env:PYTHONUNBUFFERED = '1'
 `$env:CASTFORGE_ENGINE_LOG = '$Root\engine.log'
+`$env:CASTFORGE_TOOLS = '$Root\tools'
 `$up = `$false
 try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8081/status/x -TimeoutSec 2 | Out-Null; `$up = `$true } catch {}
 if (-not `$up) {

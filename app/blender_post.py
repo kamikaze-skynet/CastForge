@@ -40,6 +40,9 @@ def parse_args():
     p.add_argument("--pixel_size", type=int, default=64, help="sprite size in pixels")
     p.add_argument("--pixel_dirs", type=int, default=1, help="1, 4 or 8 facing directions")
     p.add_argument("--pixel_angle", type=float, default=40.0, help="camera elevation, 90 = straight down")
+    p.add_argument("--style", default="none", help="none, lowpoly or voxel")
+    p.add_argument("--lowpoly_faces", type=int, default=1500)
+    p.add_argument("--voxel_res", type=int, default=40, help="voxels along the longest side")
     p.add_argument("--rig", default="off", help="off, auto, humanoid or quadruped")
     p.add_argument("--anims", default="idle,walk,run")
     p.add_argument("--anim_frames", type=int, default=8, help="pixel frames per animation loop")
@@ -339,10 +342,23 @@ def main():
     normalize(base, a.height, a.rotate)
     out["tris"]["source"] = tri_count(base)
 
+    keep_detail = False
+    if a.style in ("lowpoly", "voxel"):
+        import blender_style
+        if a.style == "lowpoly":
+            base = blender_style.lowpoly(base, a.lowpoly_faces)
+        else:
+            base, n_vox = blender_style.voxel(base, a.voxel_res)
+            out["voxels"] = n_vox
+            keep_detail = True          # decimating would break the blocks
+        out["style"] = a.style
+        out["tris"]["styled"] = tri_count(base)
+
     lods = []
     for i, frac in enumerate((1.0, 0.5, 0.25)):
         lod = duplicate(base, f"{a.name}_LOD{i}")
-        out["tris"][f"LOD{i}"] = decimate_to(lod, max(int(a.tris * frac), 200))
+        target = 0 if keep_detail else max(int(a.tris * frac), 200)
+        out["tris"][f"LOD{i}"] = decimate_to(lod, target)
         lods.append(lod)
 
     printable = make_print_mesh(base, a.name, a.height, a.print_mm) if "print" in presets else None

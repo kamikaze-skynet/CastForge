@@ -13,12 +13,19 @@ from PIL import Image
 
 import engine
 import export
+import upscale
 
 HERE = Path(__file__).resolve().parent
 CFG_PATH = HERE / "config.json"
 DEFAULTS = {"engine_url": "", "blender": "", "output_dir": str(HERE / "outputs")}
 TRIS = {"40k (hero)": 40000, "20k (standard)": 20000, "8k (mobile/props)": 8000, "2k (tiny/far)": 2000}
 DETAIL = {"Draft (fast, low VRAM)": 128, "Standard": 256, "High (more VRAM)": 384}
+STYLE_NAMES = ["Freeform", "Realistic", "Hand-painted", "Toon", "Chibi", "Dark fantasy", "Sci-fi", "Clay",
+               "Steampunk", "Low poly", "Voxel"]
+STYLE_POST = {"Low poly": "lowpoly", "Voxel": "voxel"}
+CONCEPT_Q = {"Fast (512 px)": "fast", "Quality (1024 px)": "quality"}
+SHAPE_Q = ["Fast (mini model)", "Quality (full model)"]
+TEX_Q = {"Off": "off", "Sharpen (2K)": "2k", "4K": "4k"}
 PRESETS = ["unity", "unreal", "godot", "generic", "mixamo", "print", "pixel"]
 
 
@@ -40,11 +47,11 @@ def slug(text):
 
 
 # ---------------------------------------------------------------- callbacks
-def make_concepts(prompt, seed, character):
+def make_concepts(prompt, seed, character, style, concept_q):
     if not prompt or not prompt.strip():
         raise gr.Error("Type a description first (or upload an image and skip this step).")
     import concepts  # lazy: loads torch/diffusers only when needed
-    imgs = concepts.generate(prompt, int(seed), 4, character)
+    imgs = concepts.generate(prompt, int(seed), 4, character, style=style, mode=CONCEPT_Q.get(concept_q, "fast"))
     return imgs, imgs, 0, "Concept 1 selected - click another to change, then Cast it."
 
 
@@ -63,6 +70,22 @@ def sprite_preview(files):
 RIG_KINDS = {"Auto-detect": "auto", "Humanoid (T-pose person)": "humanoid", "Four-legged animal": "quadruped"}
 
 
+def look_opts(style, voxel_res, lowpoly_faces):
+    return dict(style=style, post=STYLE_POST.get(style), voxel_res=int(voxel_res), lowpoly_faces=int(lowpoly_faces))
+
+
+def sharpen(raw, tex_q, texture=True):
+    mode = TEX_Q.get(tex_q, "off")
+    if not texture or mode == "off":
+        return ""
+    try:
+        upscale.process_glb(raw, mode, log=lambda m: None)
+        return f"\nTexture: {tex_q}"
+    except Exception as e:
+        gr.Warning(f"Texture sharpening skipped: {e}")
+        return "\nTexture: sharpening failed (kept original)"
+
+
 def rig_opts(rig_on, rig_kind, rig_anims, rig_frames):
     return dict(enabled=bool(rig_on), kind=RIG_KINDS.get(rig_kind, "auto"),
                 anims=list(rig_anims or []), frames=int(rig_frames))
@@ -75,7 +98,8 @@ def pixel_opts(px_size, px_dirs, px_angle, px_colors, px_outline):
 
 def cast(upload, concept_imgs, sel, prompt, name, seed, steps, detail, texture,
          tris, height, rotate, presets, print_mm, px_size, px_dirs, px_angle, px_colors, px_outline,
-         rig_on, rig_kind, rig_anims, rig_frames, progress=gr.Progress()):
+         rig_on, rig_kind, rig_anims, rig_frames, style, shape_q, tex_q, voxel_res, lowpoly_faces,
+         progress=gr.Progress()):
     if upload is not None:
         image, source = upload, "upload"
     elif concept_imgs:
@@ -100,17 +124,25 @@ def cast(upload, concept_imgs, sel, prompt, name, seed, steps, detail, texture,
     image.save(job / "input.png")
 
     progress(0.1, desc="Casting 3D shape" + (" + texture" if texture else "") + " (minutes)...")
+    want_q = shape_q == SHAPE_Q[1]
+    if want_q and not engine.engine_info(url).get("quality"):
+        gr.Warning("Quality shape model isn't downloaded yet - using the fast one (see README: Quality models).")
+        want_q = False
     glb = engine.generate(url, image, seed=seed, steps=steps, octree=DETAIL[detail],
-                          texture=texture, face_count=max(TRIS[tris] * 2, 40000))
+                          texture=texture, face_count=max(TRIS[tris] * 2, 40000), quality=want_q)
     raw = job / f"{name}_raw.glb"
     raw.write_bytes(glb)
+    progress(0.75, desc="Sharpening texture...")
+    tex_line = sharpen(raw, tex_q, texture)
 
     progress(0.8, desc="Blender: LODs and exports...")
     pixel = pixel_opts(px_size, px_dirs, px_angle, px_colors, px_outline)
     rig = rig_opts(rig_on, rig_kind, rig_anims, rig_frames)
-    result = export.run_post(blender, raw, job, name, TRIS[tris], height, presets, print_mm, rotate, pixel, rig)
+    look = look_opts(style, voxel_res, lowpoly_faces)
+    result = export.run_post(blender, raw, job, name, TRIS[tris], height, presets, print_mm, rotate, pixel, rig,
+                             look)
 
-    recipe = dict(pixel=pixel, rig=rig, prompt=prompt, name=name, seed=int(seed), steps=int(steps), detail=detail,
+    recipe = dict(pixel=pixel, rig=rig, look=look, shape_q=shape_q, tex_q=tex_q, prompt=prompt, name=name, seed=int(seed), steps=int(steps), detail=detail,
                   texture=bool(texture), tris=tris, height=float(height), rotate=float(rotate),
                   presets=list(presets), print_mm=float(print_mm), source=source,
                   engine=url, triangles=result["tris"])
@@ -123,12 +155,15 @@ def cast(upload, concept_imgs, sel, prompt, name, seed, steps, detail, texture,
         rg = result["rig"]
         rig_line = f"\nRig: {rg['kind']}, {rg['bones']} bones, {rg['weights']} weights, animations: {', '.join(rg['animations']) or 'none'}"
     msg = (f"Done -> {job}\nTriangles: source {t.get('source')}, LOD0 {t.get('LOD0')}, "
-           f"LOD1 {t.get('LOD1')}, LOD2 {t.get('LOD2')}" + (f", print {t['print']}" if "print" in t else "") + rig_line)
+           f"LOD1 {t.get('LOD1')}, LOD2 {t.get('LOD2')}" + (f", print {t['print']}" if "print" in t else "") + rig_line
+           + tex_line + (f"\nStyle: {style}" + (f" ({result['voxels']} voxels)" if result.get("voxels") else "")
+                         if look["post"] else "") + ("\nShape model: Quality" if want_q else ""))
     return str(raw), files, msg, sprite_preview(files)
 
 
 def finish_glb(path, name, tris, height, rotate, presets, print_mm,
-               px_size, px_dirs, px_angle, px_colors, px_outline, rig_on, rig_kind, rig_anims, rig_frames):
+               px_size, px_dirs, px_angle, px_colors, px_outline, rig_on, rig_kind, rig_anims, rig_frames,
+               style, tex_q, voxel_res, lowpoly_faces):
     if not path:
         raise gr.Error("Drop a .glb file in first.")
     if not presets:
@@ -141,14 +176,19 @@ def finish_glb(path, name, tris, height, rotate, presets, print_mm,
     job.mkdir(parents=True)
     raw = job / f"{name}_raw.glb"
     raw.write_bytes(Path(path).read_bytes())
+    tex_line = sharpen(raw, tex_q)
     result = export.run_post(blender, raw, job, name, TRIS[tris], height, presets, print_mm, rotate,
                              pixel_opts(px_size, px_dirs, px_angle, px_colors, px_outline),
-                             rig_opts(rig_on, rig_kind, rig_anims, rig_frames))
+                             rig_opts(rig_on, rig_kind, rig_anims, rig_frames),
+                             look_opts(style, voxel_res, lowpoly_faces))
     files = [f for f in result["files"] if not f.endswith(".blend")]
     rg = result.get("rig")
     rig_line = (f"\nRig: {rg['kind']}, {rg['bones']} bones, {rg['weights']} weights, animations: "
                 f"{', '.join(rg['animations']) or 'none'}") if rg else ""
-    return str(raw), files, f"Done -> {job}\nTriangles: {result['tris']}{rig_line}", sprite_preview(files)
+    style_line = (f"\nStyle: {style}" + (f" ({result['voxels']} voxels)" if result.get("voxels") else "")) \
+        if STYLE_POST.get(style) else ""
+    return (str(raw), files, f"Done -> {job}\nTriangles: {result['tris']}{rig_line}{tex_line}{style_line}",
+            sprite_preview(files))
 
 
 def list_recipes():
@@ -162,13 +202,16 @@ def load_recipe(path):
     img = Path(path).parent / "input.png"
     px = r.get("pixel", {})
     rg = r.get("rig", {})
+    lk = r.get("look", {})
     return (r["prompt"], r["name"], r["seed"], r["steps"], r["detail"], r["texture"], r["tris"],
             r["height"], r.get("rotate", 0), r["presets"], r["print_mm"],
             Image.open(img) if img.is_file() else None,
             str(px.get("size", 64)), str(px.get("dirs", 1)), px.get("angle", 40),
             px.get("colors", 24), px.get("outline", True),
             rg.get("enabled", False), next((k for k, v in RIG_KINDS.items() if v == rg.get("kind")), "Auto-detect"),
-            rg.get("anims", ["idle", "walk", "run"]), rg.get("frames", 8))
+            rg.get("anims", ["idle", "walk", "run"]), rg.get("frames", 8),
+            lk.get("style", "Freeform"), r.get("shape_q", SHAPE_Q[0]), r.get("tex_q", "Off"),
+            lk.get("voxel_res", 40), lk.get("lowpoly_faces", 1500))
 
 
 def engine_log_tail():
@@ -227,6 +270,9 @@ with gr.Blocks(title="CastForge") as ui:
                 with gr.Row():
                     seed = gr.Number(label="Seed", value=42, precision=0)
                     character = gr.Checkbox(label="Character (T-pose, for rigging)")
+                with gr.Row():
+                    style = gr.Dropdown(STYLE_NAMES, value="Freeform", label="Style")
+                    concept_q = gr.Radio(list(CONCEPT_Q), value="Quality (1024 px)", label="Concept images")
                 concept_btn = gr.Button("1. Make 4 concepts", variant="secondary")
                 upload = gr.Image(label="...or use your own image / sketch / concept art", type="pil")
                 gallery = gr.Gallery(label="Concepts (click to pick)", columns=4, height=220,
@@ -236,6 +282,11 @@ with gr.Blocks(title="CastForge") as ui:
                 name = gr.Textbox(label="File name (optional)")
                 with gr.Accordion("Settings", open=True):
                     texture = gr.Checkbox(label="Texture it (needs more VRAM & time)", value=True)
+                    shape_q = gr.Radio(SHAPE_Q, value=SHAPE_Q[0], label="Shape model (Quality: more detail, slower)")
+                    tex_q = gr.Radio(list(TEX_Q), value="Sharpen (2K)", label="Texture sharpening (AI upscale)")
+                    with gr.Row():
+                        voxel_res = gr.Slider(12, 96, value=40, step=2, label="Voxel style: cubes along longest side")
+                        lowpoly_faces = gr.Slider(150, 6000, value=1500, step=50, label="Low poly style: faces")
                     detail = gr.Radio(list(DETAIL), value="Standard", label="Shape detail")
                     steps = gr.Slider(5, 50, value=8, step=1, label="Shape steps (turbo model: 5-10)")
                     tris = gr.Radio(list(TRIS), value="20k (standard)", label="Triangle budget (LOD0)")
@@ -282,24 +333,25 @@ with gr.Blocks(title="CastForge") as ui:
             refresh = gr.Button("Refresh")
             load_btn = gr.Button("Load into Cast tab", variant="primary")
 
-    concept_btn.click(make_concepts, [prompt, seed, character],
+    concept_btn.click(make_concepts, [prompt, seed, character, style, concept_q],
                       [gallery, concept_state, sel_state, pick_msg])
     gallery.select(pick, None, [sel_state, pick_msg])
     upload.change(lambda img: "Using your uploaded image." if img is not None else "", upload, pick_msg)
     cast_btn.click(cast, [upload, concept_state, sel_state, prompt, name, seed, steps, detail,
                           texture, tris, height, rotate, presets, print_mm,
                           px_size, px_dirs, px_angle, px_colors, px_outline,
-                          rig_on, rig_kind, rig_anims, rig_frames],
+                          rig_on, rig_kind, rig_anims, rig_frames, style, shape_q, tex_q, voxel_res, lowpoly_faces],
                    [preview, out_files, out_msg, px_prev]).then(engine_status, None, status)
     fin_btn.click(finish_glb, [glb_in, name, tris, height, rotate, presets, print_mm,
                                px_size, px_dirs, px_angle, px_colors, px_outline,
-                               rig_on, rig_kind, rig_anims, rig_frames],
+                               rig_on, rig_kind, rig_anims, rig_frames, style, tex_q, voxel_res, lowpoly_faces],
                   [fin_prev, fin_files, fin_msg, fin_px])
     refresh.click(lambda: gr.Dropdown(choices=list_recipes()), None, recipe_dd)
     load_btn.click(load_recipe, recipe_dd, [prompt, name, seed, steps, detail, texture, tris,
                                             height, rotate, presets, print_mm, upload,
                                             px_size, px_dirs, px_angle, px_colors, px_outline,
-                                            rig_on, rig_kind, rig_anims, rig_frames])
+                                            rig_on, rig_kind, rig_anims, rig_frames,
+                                            style, shape_q, tex_q, voxel_res, lowpoly_faces])
     recheck.click(engine_status, None, status)
     ui.load(engine_status, None, status)
 

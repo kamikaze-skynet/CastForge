@@ -60,6 +60,8 @@ p.add_argument("--model_path", default="tencent/Hunyuan3D-2mini")
 p.add_argument("--subfolder", default="hunyuan3d-dit-v2-mini-turbo")
 p.add_argument("--tex_model_path", default="tencent/Hunyuan3D-2")
 p.add_argument("--enable_tex", action="store_true")
+p.add_argument("--quality_model_path", default="tencent/Hunyuan3D-2")
+p.add_argument("--quality_subfolder", default="hunyuan3d-dit-v2-0-turbo")
 p.add_argument("--profile", type=int, default=4,
                help="mmgp profile: 4 = 12GB+ cards, 5 = 8GB cards / low RAM")
 args = p.parse_args()
@@ -85,6 +87,24 @@ shape_worker = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
 if "turbo" in args.subfolder:
     shape_worker.enable_flashvdm(mc_algo="mc")
 
+# Optional "Quality" shape model (full-size Hunyuan3D-2). Only loaded when its files are
+# already on disk (downloaded with curl), so a slow Hugging Face download never blocks startup.
+quality_worker = None
+_models_dir = os.environ.get("HY3DGEN_MODELS", "")
+_q_dir = os.path.join(_models_dir, args.quality_model_path, args.quality_subfolder)
+_q_vae = os.path.join(_models_dir, args.quality_model_path, "hunyuan3d-vae-v2-0-turbo")
+if all(os.path.isfile(os.path.join(d, "model.fp16.safetensors")) for d in (_q_dir, _q_vae)):
+    try:
+        quality_worker = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            args.quality_model_path, subfolder=args.quality_subfolder, use_safetensors=True, device="cuda")
+        quality_worker.enable_flashvdm(mc_algo="mc")
+        print("Quality shape model loaded:", _q_dir, flush=True)
+    except Exception as e:
+        quality_worker = None
+        print("Quality shape model failed to load:", e, flush=True)
+else:
+    print("Quality shape model not downloaded (optional):", _q_dir, flush=True)
+
 # texture models load after the shape model, so the big shape file is read while RAM is still free
 tex_worker = None
 if args.enable_tex:
@@ -97,6 +117,9 @@ if args.enable_tex:
 
 replace_property_getter(shape_worker, "_execution_device", lambda self: "cuda")
 pipe = offload.extract_models("i23d_worker", shape_worker)
+if quality_worker is not None:
+    replace_property_getter(quality_worker, "_execution_device", lambda self: "cuda")
+    pipe.update(offload.extract_models("i23d_quality", quality_worker))
 if tex_worker is not None:
     pipe.update(offload.extract_models("texgen_worker", tex_worker))
     tex_worker.models["multiview_model"].pipeline.vae.use_slicing = True
@@ -114,7 +137,7 @@ lock = threading.Lock()
 
 @app.get("/status/{uid}")
 def status(uid: str):
-    return {"status": "ready", "texture": tex_worker is not None}
+    return {"status": "ready", "texture": tex_worker is not None, "quality": quality_worker is not None}
 
 
 @app.post("/generate")
@@ -130,7 +153,8 @@ async def generate(req: Request):
                 mesh = trimesh.load(io.BytesIO(base64.b64decode(prm["mesh"])), file_type="glb", force="mesh")
             else:
                 gen = torch.Generator().manual_seed(int(prm.get("seed", 1234)))
-                out = shape_worker(image=img, num_inference_steps=int(prm.get("num_inference_steps", 5)),
+                worker = quality_worker if (prm.get("quality") and quality_worker is not None) else shape_worker
+                out = worker(image=img, num_inference_steps=int(prm.get("num_inference_steps", 5)),
                                    guidance_scale=float(prm.get("guidance_scale", 5.0)), generator=gen,
                                    octree_resolution=int(prm.get("octree_resolution", 256)),
                                    num_chunks=200000, output_type="mesh")
@@ -154,5 +178,6 @@ async def generate(req: Request):
 
 if __name__ == "__main__":
     print(f"CastForge engine ready on http://{args.host}:{args.port} "
-          f"(texture: {'on' if tex_worker else 'off'}, profile {args.profile})", flush=True)
+          f"(texture: {'on' if tex_worker else 'off'}, quality shape model: {'on' if quality_worker else 'off'}, "
+          f"profile {args.profile})", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, workers=1)

@@ -18,8 +18,10 @@ def find_blender(configured=""):
     return shutil.which("blender")
 
 
-def run_post(blender, glb, outdir, name, tris, height, presets, print_mm, rotate=0.0, pixel=None, rig=None):
+def run_post(blender, glb, outdir, name, tris, height, presets, print_mm, rotate=0.0, pixel=None, rig=None,
+             look=None):
     pixel = pixel or {}
+    look = look or {}
     rig = rig or {}
     cmd = [blender, "-b", "--factory-startup", "--python-exit-code", "1",
            "--python", str(HERE / "blender_post.py"), "--",
@@ -29,6 +31,9 @@ def run_post(blender, glb, outdir, name, tris, height, presets, print_mm, rotate
            "--rotate", str(float(rotate)),
            "--pixel_size", str(int(pixel.get("size", 64))), "--pixel_dirs", str(int(pixel.get("dirs", 1))),
            "--pixel_angle", str(float(pixel.get("angle", 40))),
+           "--style", str(look.get("post") or "none"),
+           "--lowpoly_faces", str(int(look.get("lowpoly_faces", 1500))),
+           "--voxel_res", str(int(look.get("voxel_res", 40))),
            "--rig", str(rig.get("kind", "off")) if rig.get("enabled") else "off",
            "--anims", ",".join(rig.get("anims", ["idle", "walk", "run"])) or "none",
            "--anim_frames", str(int(rig.get("frames", 8)))]

@@ -32,8 +32,16 @@ def _b64_png(img):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def engine_info(url):
+    """What the running engine can do: {"texture": bool, "quality": bool}."""
+    try:
+        return requests.get(url.rstrip("/") + "/status/castforge-info", timeout=3).json()
+    except Exception:
+        return {}
+
+
 def generate(url, image, seed=1234, steps=5, octree=256, guidance=5.0,
-             texture=True, face_count=40000, mesh_bytes=None, timeout=3600):
+             texture=True, face_count=40000, mesh_bytes=None, timeout=3600, quality=False):
     """Image (PIL) -> GLB bytes. Pass mesh_bytes to texture an existing GLB instead."""
     payload = {
         "image": _b64_png(image),
@@ -44,6 +52,7 @@ def generate(url, image, seed=1234, steps=5, octree=256, guidance=5.0,
         "texture": bool(texture),
         "face_count": int(face_count),
         "type": "glb",
+        "quality": bool(quality),
     }
     if mesh_bytes:
         payload["mesh"] = base64.b64encode(mesh_bytes).decode()
